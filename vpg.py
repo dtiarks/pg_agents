@@ -9,10 +9,11 @@ Created on Sun Mar 26 11:04:47 2017
 from __future__ import print_function
 
 import gym
-# from rllab.envs.box2d.cartpole_env import CartpoleEnv
-# from rllab.envs.normalized_env import normalize
+from rllab.envs.box2d.cartpole_env import CartpoleEnv
+from rllab.envs.normalized_env import normalize
 import numpy as np
 import tensorflow as tf
+import tensorflow.contrib.distributions as ds
 import time
 from collections import deque  
 import datetime
@@ -43,6 +44,7 @@ class VPGAgent(object):
         
         
         self.policy=gaussian_policy.GaussPolicy(sess,env,"gaussian_policy",params)
+        self.policy_old=gaussian_policy.GaussPolicy(sess,env,"gaussian_policy_old",params,train=False)
 
         
         self.initTraining()
@@ -75,6 +77,9 @@ class VPGAgent(object):
 #        sess.graph.finalize()
 
     def initTraining(self):
+        # self.kl_div=tf.reduce_mean(ds.kl_divergence(self.policy.dist,self.policy_old.dist))
+        # self.hessian=tf.hessians(self.kl_div,self.policy.action_placeholder)
+
         self.std_op=tf.log(self.policy.dist.stddev())
         self.global_step = tf.Variable(0, trainable=False)
 
@@ -112,8 +117,16 @@ class VPGAgent(object):
             self.policy.action_placeholder:actions,
             self.policy.return_placeholder:returns
             })
-        print(np.mean(std))
-        # print(len(s))
+        # print(np.mean(std))
+        # kl=self.sess.run([self.hessian],feed_dict={
+        #     self.policy.input_placeholder:observations,
+        #     self.policy.action_placeholder:actions,
+        #     self.policy.return_placeholder:returns,
+        #     self.policy_old.input_placeholder:observations,
+        #     self.policy_old.action_placeholder:actions,
+        #     self.policy_old.return_placeholder:returns
+        #     })
+        # print(kl)
         # print(rewards[:,0].shape)
         return l 
     
@@ -123,6 +136,7 @@ class VPGAgent(object):
     
 parser = argparse.ArgumentParser()
 parser.add_argument("-E","--env", type=str, help="Mujoco task in Gym, (default: InvertedPendulum-v1)",default='MountainCarContinuous-v0')
+parser.add_argument("-B","--baseline", type=bool, help="Use linear base line",default=True)
 parser.add_argument("-d","--dir", type=str, help="Directory where the relevant training info is stored")
 parser.add_argument("-e","--eval", type=str, help="Evaluation directory. Movies are stored here.")
 parser.add_argument("-c","--checkpoint",type=str, help="Directory of latest checkpoint.")
@@ -136,10 +150,11 @@ params={
         "Env":'Pendulum-v0',
         "timesteps":500,#10000,
         "trajectories":100,
-        "iterations":350,
+        "iterations":100,
         "discount":0.99,
-        "learningrate":0.002,
+        "learningrate":0.01,
         "init_std":0.99,
+        "use_baseline":args.baseline,
         "actionsize": env.action_space.shape[0],
         "obssize": env.observation_space.shape[0],
         "traindir":"./train_dir",
@@ -195,6 +210,7 @@ with tf.Session() as sess:
         returns=[]#np.empty((params['trajectories']*params['timesteps']))
         observations=[]#np.empty((params['trajectories']*params['timesteps'],params["obssize"]))
         actions=[]#np.empty((params['trajectories']*params['timesteps'],params["actionsize"]))
+        advantages=[]
         times=[]
 
         traj_returns=[]
@@ -216,6 +232,7 @@ with tf.Session() as sess:
             rewards=[]
             base_obs=[]
             base_times=[]
+            base_actions=[]
             ret=0
             done=False
             for t in range(params['timesteps']):
@@ -228,17 +245,14 @@ with tf.Session() as sess:
                 # if i==0:
                 #     env.render()
 
-
                 if done:
                     break
                 
                 rewards.append(r)
-                observations.append(obsNew)
-                actions.append(action)
-                times.append(t)
                 
                 base_times.append(t)
                 base_obs.append(obsNew)
+                base_actions.append(action)
 
                 obsNew=obs
                     
@@ -248,36 +262,49 @@ with tf.Session() as sess:
                 k+=1
 
             traj_returns.append(ret)
+            observations.append(np.array(base_obs))
+            actions.append(np.array(base_actions))
+            times.append(base_times)
 
-            bs=baseline.predict(np.array(base_obs),np.expand_dims(np.array(base_times),axis=1))
-            print("Baselines")
-            print(np.array(bs))
+            if params["use_baseline"]:
+                bs=baseline.predict(base_times,base_obs)
             
             return_disc=0
             returns_l=[]
+            adv_l=[]
             for tx in range(len(rewards)-1,-1,-1):
                 return_disc=rewards[tx]+params['discount']*return_disc
                 returns_l.append(return_disc)
-            returns_l=returns_l[::-1]
+                if params["use_baseline"]:
+                    adv_l.append(return_disc-bs[tx])
+            returns_l=np.array(returns_l[::-1])
+            adv_l=np.array(adv_l[::-1])
+            
+            adv_l = (adv_l - np.mean(adv_l)) / (np.std(adv_l) + 1e-8)
 
-            for rx in returns_l:
-                returns.append(np.array(rx))
+            returns.append(returns_l)
+            advantages.append(adv_l)
 
-        baseline.fit(np.expand_dims(np.array(returns),axis=1),np.array(observations),np.expand_dims(np.array(times),axis=1))
+
+        if params["use_baseline"]:
+            baseline.fit(returns, observations)
+        
         print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(i,rcum/(i+1),c,t))
-        # sys.stdout.flush()
-
+        
         vpga.assignMetrics(e,feed_dict={vpga.undiscounted_return_plh:rcum/(i+1),
                                       vpga.maxreturn_plh:np.max(traj_returns)})
 
         print("Updating policy...")
+        obs_batch=np.concatenate([o for o in observations])
+        action_batch=np.concatenate([a for a in actions])
+        returns_batch=np.concatenate([r for r in returns])
+        advantages_batch=np.concatenate([a for a in advantages])
+        if params["use_baseline"]:
+            vpga.updatePolicy(advantages_batch,obs_batch,action_batch)
+        else:
+            vpga.updatePolicy(returns_batch,obs_batch,action_batch)
 
-        vpga.updatePolicy(returns,np.array(observations),np.array(actions))
 
-
-        
-        
-    
     obsNew = env.reset()
     obsNew=np.array(obsNew).ravel()
 
