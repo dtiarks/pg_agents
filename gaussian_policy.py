@@ -27,8 +27,12 @@ class GaussPolicy(object):
         self.train=train
         
         self.params_list=[]
+        self.params_shapes=[]
 
         self.buildLowDimNet()
+
+        for p in self.params_list:
+            self.params_shapes.append(p.shape.as_list())
 # 
         # self.dist=ds.MultivariateNormalDiag(loc=self.scaled_out,scale_diag=params["init_std"]*tf.ones_like(self.scaled_out))
         self.dist=ds.MultivariateNormalDiag(loc=self.scaled_out,scale_diag=tf.exp(self.log_std))
@@ -44,12 +48,7 @@ class GaussPolicy(object):
 
         self.surr_loss=-1*tf.reduce_mean(self.lp*self.return_placeholder)
 
-        # stochastic_tensor=bf.stochastic_tensor.StochasticTensor(self.dist)
-        # lo=stochastic_tensor.loss(-1*self.reward_placeholder[:,0])
-        # self.sf=bf.stochastic_gradient_estimators.score_function(stochastic_tensor,self.action_placeholder,-1*self.reward_placeholder)
-
         self.surr_gradient = tf.gradients(self.surr_loss, self.params_list)
-        # self.surr_gradient = tf.gradients(self.sf, self.params_list)
 
 
     def normc_initializer(self, std=1.0):

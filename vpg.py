@@ -14,6 +14,7 @@ from rllab.envs.normalized_env import normalize
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.distributions as ds
+from tensorflow.python.ops.gradients_impl import _hessian_vector_product
 import time
 from collections import deque  
 import datetime
@@ -24,6 +25,7 @@ import argparse
 from tensorflow.python.client import timeline
 import matplotlib.pyplot as plt
 import roboschool
+import vectorize
 
 import gaussian_policy
 import linear_baseline
@@ -77,14 +79,25 @@ class VPGAgent(object):
 #        sess.graph.finalize()
 
     def initTraining(self):
-        # self.kl_div=tf.reduce_mean(ds.kl_divergence(self.policy.dist,self.policy_old.dist))
-        # self.hessian=tf.hessians(self.kl_div,self.policy.action_placeholder)
+        self.kl_div=tf.reduce_mean(ds.kl_divergence(self.policy.dist,self.policy_old.dist))
+        self.v_plh=[
+            tf.placeholder(tf.float32,shape=s,name="cg_vector_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
+            ]
+
+        self.x_init=[0.0*np.random.random(s) for s in self.policy.params_shapes]
+        
+        self.hv=_hessian_vector_product(tf.to_float(self.kl_div),self.policy.params_list, self.v_plh)
+
+        self.grad_plh=[
+            tf.placeholder(tf.float32,shape=s,name="grad_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
+            ]
 
         self.std_op=tf.log(self.policy.dist.stddev())
         self.global_step = tf.Variable(0, trainable=False)
 
         self.optimizer = tf.train.AdamOptimizer(self.params['learningrate'])
-        self.train=self.optimizer.apply_gradients(zip(self.policy.surr_gradient , self.policy.params_list))
+        # self.apply_grads=self.optimizer.apply_gradients(zip(self.policy.surr_gradient , self.policy.params_list))
+        self.apply_grads=self.optimizer.apply_gradients(zip(self.grad_plh , self.policy.params_list))
 
     def initSummaries(self):
         self.undiscounted_return=tf.Variable(0,name="undiscounted_return",dtype=tf.float32,trainable=False)
@@ -110,33 +123,80 @@ class VPGAgent(object):
         return a
 
     def updatePolicy(self,returns,observations,actions):
-        
-
-        l,std=self.sess.run([self.train,self.std_op],feed_dict={
-            self.policy.input_placeholder:observations,
-            self.policy.action_placeholder:actions,
-            self.policy.return_placeholder:returns
-            })
-        # print(np.mean(std))
-        # kl=self.sess.run([self.hessian],feed_dict={
+        # self.sess.run([self.apply_grads],feed_dict={
         #     self.policy.input_placeholder:observations,
         #     self.policy.action_placeholder:actions,
-        #     self.policy.return_placeholder:returns,
-        #     self.policy_old.input_placeholder:observations,
-        #     self.policy_old.action_placeholder:actions,
-        #     self.policy_old.return_placeholder:returns
+        #     self.policy.return_placeholder:returns
         #     })
-        # print(kl)
-        # print(rewards[:,0].shape)
-        return l 
-    
+        step=self.computeInvFIMProd(returns,observations,actions)
+        fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
+
+        self.sess.run([self.apply_grads],feed_dict=fd)
+        
+
+    #goes into TNPG class
+    def buidFeedDict(self,v_init,returns,observations,actions):
+        fd={plh_key:v_entry for plh_key,v_entry in zip(self.v_plh,v_init)}
+        fd[self.policy.input_placeholder]=observations
+        fd[self.policy.action_placeholder]=actions
+        fd[self.policy.return_placeholder]=returns
+        fd[self.policy_old.input_placeholder]=observations
+        fd[self.policy_old.action_placeholder]=actions
+        fd[self.policy_old.return_placeholder]=returns
+
+        return fd
+
+    def computeHessianVector(self,v_init,returns,observations,actions):
+        hv=self.sess.run(self.hv,feed_dict=self.buidFeedDict(v_init,returns,observations,actions))
+        return vectorize.flatten_array_list(hv)
+
+    def computeInvFIMProd(self,returns,observations,actions):
+        b_nested=self.policy.getSurrLossGrad(returns,observations,actions)
+        b=vectorize.flatten_array_list(b_nested)
+        x_init=self.x_init
+        x_flat=vectorize.flatten_array_list(x_init)
+        
+        Ax=self.computeHessianVector(x_init,returns,observations,actions)
+
+        r_0=b-Ax
+        d_0=r_0
+
+        d=d_0
+        r=r_0
+
+        for i in range(10):
+            d_nested=vectorize.unflatten_array_list(d,self.policy.params_shapes)
+            z=self.computeHessianVector(d_nested,returns,observations,actions)
+            
+            num=np.dot(r,r)
+            den=np.dot(d,z)
+            alpha=num/den
+
+            x_flat=x_flat+alpha*d
+            r_1=r-alpha*z
+
+            num=np.dot(r_1,r_1)
+            den=np.dot(r,r)
+            beta=num/den
+
+            d=r_1+beta*d
+
+            res=np.linalg.norm(r_1)
+
+        print(res)
+        x_out=vectorize.unflatten_array_list(x_flat,self.policy.params_shapes)
+
+
+        return x_out
+            
+        
         
 
 # def run():
     
 parser = argparse.ArgumentParser()
 parser.add_argument("-E","--env", type=str, help="Mujoco task in Gym, (default: InvertedPendulum-v1)",default='MountainCarContinuous-v0')
-parser.add_argument("-B","--baseline", type=bool, help="Use linear base line",default=True)
+parser.add_argument("-B","--baseline", type=bool, help="Use linear base line",default=False)
 parser.add_argument("-d","--dir", type=str, help="Directory where the relevant training info is stored")
 parser.add_argument("-e","--eval", type=str, help="Evaluation directory. Movies are stored here.")
 parser.add_argument("-c","--checkpoint",type=str, help="Directory of latest checkpoint.")
