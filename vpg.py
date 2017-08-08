@@ -76,15 +76,24 @@ class VPGAgent(object):
         init = tf.global_variables_initializer()
         
         sess.run(init)
+
+        sess.run(self.param_assign,feed_dict={plh_key:0.99*p_entry.eval() for plh_key,p_entry in zip(self.p_plh,self.policy.params_list)})
+        
 #        sess.graph.finalize()
 
     def initTraining(self):
+        self.p_plh=[
+            tf.placeholder(tf.float32,shape=s,name="assign_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
+            ]
+        self.param_assign=self.policy_old.assignParametersOp(self.p_plh)
+        
+
         self.kl_div=tf.reduce_mean(ds.kl_divergence(self.policy.dist,self.policy_old.dist))
         self.v_plh=[
             tf.placeholder(tf.float32,shape=s,name="cg_vector_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
             ]
 
-        self.x_init=[0.0*np.random.random(s) for s in self.policy.params_shapes]
+        self.x_init=[0.3*np.random.random(s) for s in self.policy.params_shapes]
         
         self.hv=_hessian_vector_product(tf.to_float(self.kl_div),self.policy.params_list, self.v_plh)
 
@@ -132,6 +141,9 @@ class VPGAgent(object):
         fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
 
         self.sess.run([self.apply_grads],feed_dict=fd)
+
+        # print("update")
+        sess.run(self.param_assign,feed_dict={plh_key:0.99*p_entry.eval() for plh_key,p_entry in zip(self.p_plh,self.policy.params_list)})
         
 
     #goes into TNPG class
@@ -153,9 +165,9 @@ class VPGAgent(object):
     def computeInvFIMProd(self,returns,observations,actions):
         b_nested=self.policy.getSurrLossGrad(returns,observations,actions)
         b=vectorize.flatten_array_list(b_nested)
-        x_init=self.x_init
+        x_init=[0.0*np.random.random(s) for s in self.policy.params_shapes]
         x_flat=vectorize.flatten_array_list(x_init)
-        
+
         Ax=self.computeHessianVector(x_init,returns,observations,actions)
 
         r_0=b-Ax
@@ -164,7 +176,7 @@ class VPGAgent(object):
         d=d_0
         r=r_0
 
-        for i in range(10):
+        for i in range(40):
             d_nested=vectorize.unflatten_array_list(d,self.policy.params_shapes)
             z=self.computeHessianVector(d_nested,returns,observations,actions)
             
@@ -183,7 +195,7 @@ class VPGAgent(object):
 
             res=np.linalg.norm(r_1)
 
-        print(res)
+            print(res)
         x_out=vectorize.unflatten_array_list(x_flat,self.policy.params_shapes)
 
 
@@ -210,7 +222,7 @@ params={
         "Env":'Pendulum-v0',
         "timesteps":500,#10000,
         "trajectories":100,
-        "iterations":100,
+        "iterations":15,
         "discount":0.99,
         "learningrate":0.01,
         "init_std":0.99,
@@ -297,6 +309,7 @@ with tf.Session() as sess:
             done=False
             for t in range(params['timesteps']):
                 action = vpga.takeAction(obsNew)
+                # print(action)
 
                 action=np.array(action).ravel()
                 obs, r, done, _ = env.step(action)

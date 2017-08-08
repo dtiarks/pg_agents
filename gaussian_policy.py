@@ -51,12 +51,12 @@ class GaussPolicy(object):
         self.surr_gradient = tf.gradients(self.surr_loss, self.params_list)
 
 
-    def normc_initializer(self, std=1.0):
-        def _initializer(shape, dtype=None, partition_info=None):  # pylint: disable=W0613
-            out = np.random.randn(*shape).astype(np.float32)
-            out *= std / np.sqrt(np.square(out).sum(axis=0, keepdims=True))
-            return tf.constant(out)
-        return _initializer
+    def assignParametersOp(self,params):
+        op_list=[]
+        for pold,pnew in zip(self.params_list,params):
+            op_list.append(pold.assign(pnew))
+
+        return op_list
       
     def buildLowDimNet(self):
         input_layer = self.input_placeholder
