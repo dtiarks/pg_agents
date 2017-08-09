@@ -88,14 +88,14 @@ class VPGAgent(object):
         self.param_assign=self.policy_old.assignParametersOp(self.p_plh)
         
 
-        self.kl_div=tf.reduce_mean(ds.kl_divergence(self.policy.dist,self.policy_old.dist))
+        self.kl_div=tf.reduce_mean(ds.kl_divergence(self.policy.dist,self.policy_old.dist,allow_nan_stats=False))
         self.v_plh=[
             tf.placeholder(tf.float32,shape=s,name="cg_vector_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
             ]
 
         self.x_init=[0.3*np.random.random(s) for s in self.policy.params_shapes]
         
-        self.hv=_hessian_vector_product(tf.to_float(self.kl_div),self.policy.params_list, self.v_plh)
+        self.hv=_hessian_vector_product(self.kl_div,self.policy.params_list, self.v_plh)
 
         self.grad_plh=[
             tf.placeholder(tf.float32,shape=s,name="grad_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
@@ -165,37 +165,41 @@ class VPGAgent(object):
     def computeInvFIMProd(self,returns,observations,actions):
         b_nested=self.policy.getSurrLossGrad(returns,observations,actions)
         b=vectorize.flatten_array_list(b_nested)
-        x_init=[0.0*np.random.random(s) for s in self.policy.params_shapes]
+        assert np.isfinite(b.all()), "Surrogate gradient is not finite"
+        x_init=[0.5*np.random.random(s) for s in self.policy.params_shapes]
         x_flat=vectorize.flatten_array_list(x_init)
 
         Ax=self.computeHessianVector(x_init,returns,observations,actions)
+        assert np.isfinite(Ax.all()), "First hessian vector product is not finite"
 
-        r_0=b-Ax
-        d_0=r_0
+        d=r_0
+        r=b-Ax
 
-        d=d_0
-        r=r_0
-
-        for i in range(40):
+        for i in range(400):
             d_nested=vectorize.unflatten_array_list(d,self.policy.params_shapes)
             z=self.computeHessianVector(d_nested,returns,observations,actions)
+            assert np.isfinite(z.all()), "CG hessian vector product is not finite"
             
             num=np.dot(r,r)
             den=np.dot(d,z)
-            alpha=num/den
+            alpha=np.true_divide(num,den)
 
             x_flat=x_flat+alpha*d
             r_1=r-alpha*z
 
+            assert np.isfinite(x_flat.all()), "CG updated x is not finite"
+
             num=np.dot(r_1,r_1)
             den=np.dot(r,r)
-            beta=num/den
+            beta=np.true_divide(num,den)
 
             d=r_1+beta*d
 
+            assert np.isfinite(d.all()), "CG search direction is not finite"
+
             res=np.linalg.norm(r_1)
 
-            print(res)
+            # print(res)
         x_out=vectorize.unflatten_array_list(x_flat,self.policy.params_shapes)
 
 
