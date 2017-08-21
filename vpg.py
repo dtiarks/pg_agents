@@ -10,8 +10,10 @@ from __future__ import print_function
 
 import gym
 from rllab.envs.box2d.cartpole_env import CartpoleEnv
+from rllab.envs.box2d.double_pendulum_env import DoublePendulumEnv
 from rllab.envs.normalized_env import normalize
 import numpy as np
+import scipy as sp
 import tensorflow as tf
 import tensorflow.contrib.distributions as ds
 from tensorflow.python.ops.gradients_impl import _hessian_vector_product
@@ -25,12 +27,15 @@ import argparse
 from tensorflow.python.client import timeline
 import matplotlib.pyplot as plt
 import roboschool
-import vectorize
+import utils
+
+from tensorflow.python import debug as tf_debug
 
 import gaussian_policy
 import linear_baseline
 
-
+def is_pos_def(x):
+    return np.all(np.linalg.eigvals(x) > 0)
 
 class VPGAgent(object):
     
@@ -77,37 +82,69 @@ class VPGAgent(object):
         
         sess.run(init)
 
-        sess.run(self.param_assign,feed_dict={plh_key:0.99*p_entry.eval() for plh_key,p_entry in zip(self.p_plh,self.policy.params_list)})
+        sess.run(self.param_assign,feed_dict={plh_key:p_entry.eval() for plh_key,p_entry in zip(self.p_plh,self.policy.params_list)})
         
-#        sess.graph.finalize()
+        sess.graph.finalize()
+
+
+    def _hv_grad(self, v, kl,params):
+        g1=tf.gradients(kl,params)
+        g_prod=[g*v_s for g,v_s in zip(g1,v)]
+        hessian_prod=tf.gradients(g_prod,params)
+        return hessian_prod
+
+    def _mvn_kl_div(self,a,b):
+        co0=a.co
+        co1=b.co
+        co1_i=tf.matrix_inverse(co1)
+        mu=b.means-a.means
+        k=self.params["actionsize"]
+
+        A=tf.trace(tf.matmul(co0,co1_i))
+        B=tf.squeeze(tf.matmul(tf.matmul(tf.expand_dims(mu,1),co1_i),tf.expand_dims(mu,2)),axis=[1,2])
+        det_co1=tf.matrix_determinant(co1)
+        det_co0=tf.matrix_determinant(co0)
+        C=tf.log(det_co1/det_co0)
+        ret=0.5*(A+B-k+C)
+        return ret
 
     def initTraining(self):
+        #into policy
         self.p_plh=[
             tf.placeholder(tf.float32,shape=s,name="assign_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
             ]
         self.param_assign=self.policy_old.assignParametersOp(self.p_plh)
+        self.param_assign_new=self.policy.assignParametersOp(self.p_plh)
         
+        #stays in algo (only kl div algos)
+        self.kl_div_new=tf.reduce_mean(ds.kl_divergence(self.policy_old.dist,self.policy.dist,allow_nan_stats=False))
+        # self.kl_div_new=tf.reduce_mean(self._kl_div(self.policy_old.dist,self.policy.dist))
+        self.kl_test=tf.reduce_mean(self._mvn_kl_div(self.policy_old,self.policy))
 
-        self.kl_div=tf.reduce_mean(ds.kl_divergence(self.policy.dist,self.policy_old.dist,allow_nan_stats=False))
+
+        self.g1=tf.gradients(self.kl_test,self.policy.params_list)
+
+        #stays in algo (own function?)
         self.v_plh=[
             tf.placeholder(tf.float32,shape=s,name="cg_vector_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
             ]
+        # self.hv2=_hessian_vector_product(self.kl_div_new,self.policy.params_list, self.v_plh)
+        self.hv2=_hessian_vector_product(self.kl_test,self.policy.params_list, self.v_plh)
 
-        self.x_init=[0.3*np.random.random(s) for s in self.policy.params_shapes]
-        
-        self.hv=_hessian_vector_product(self.kl_div,self.policy.params_list, self.v_plh)
-
+        #goes into policy
         self.grad_plh=[
             tf.placeholder(tf.float32,shape=s,name="grad_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
             ]
 
-        self.std_op=tf.log(self.policy.dist.stddev())
+        #????
         self.global_step = tf.Variable(0, trainable=False)
 
-        self.optimizer = tf.train.AdamOptimizer(self.params['learningrate'])
-        # self.apply_grads=self.optimizer.apply_gradients(zip(self.policy.surr_gradient , self.policy.params_list))
+        #into policy
+        self.lr_plh = tf.placeholder(tf.float32,name="learningrate_plh")
+        self.optimizer = tf.train.AdamOptimizer(self.lr_plh)
         self.apply_grads=self.optimizer.apply_gradients(zip(self.grad_plh , self.policy.params_list))
 
+    #more here
     def initSummaries(self):
         self.undiscounted_return=tf.Variable(0,name="undiscounted_return",dtype=tf.float32,trainable=False)
         self.undiscounted_return_plh=tf.placeholder(tf.float32,name="undiscounted_return_plh")
@@ -132,23 +169,60 @@ class VPGAgent(object):
         return a
 
     def updatePolicy(self,returns,observations,actions):
-        # self.sess.run([self.apply_grads],feed_dict={
-        #     self.policy.input_placeholder:observations,
-        #     self.policy.action_placeholder:actions,
-        #     self.policy.return_placeholder:returns
-        #     })
-        step=self.computeInvFIMProd(returns,observations,actions)
+        v=[np.random.random(s) for s in self.policy.params_shapes]
+        fd2={plh_key:v_entry for plh_key,v_entry in zip(self.v_plh,v)}
+        fd2[self.policy.input_placeholder]=observations
+        fd2[self.policy.action_placeholder]=actions
+        fd2[self.policy.return_placeholder]=returns
+        fd2[self.policy_old.input_placeholder]=observations
+        fd2[self.policy_old.action_placeholder]=actions
+        fd2[self.policy_old.return_placeholder]=returns
+        
+        g1=self.sess.run(self.policy.co,feed_dict=fd2)
+        # print("g1",g1)
+        step,step_len=self.computeInvFIMProd(returns,observations,actions)
+
+        # neg_step=[-1.*s for s in step]
+
+        params_backup=[p.eval() for p in self.policy.params_list]
+        step_len=-step_len/5.
+        print("step_len",step_len)
+        for i in range(200):
+            fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
+            fd[self.lr_plh]=step_len
+
+            self.sess.run(self.apply_grads,feed_dict=fd)
+            
+            # kl_test,kl=self.sess.run([self.kl_test,self.kl_div_new],feed_dict=fd2)
+            kl=self.sess.run(self.kl_test,feed_dict=fd2)
+
+            # print("kl",kl)
+            # print("kl_test",kl_test)
+            # print("step_len",step_len)
+            if kl<self.params["kl_penalty"]:
+                break
+
+            step_len=step_len/1.5
+            self.sess.run(self.param_assign_new,feed_dict={plh_key:p_entry for plh_key,p_entry in zip(self.p_plh,params_backup)})
+        print("steps", i)
+        # step=self.policy.getSurrLossGrad(returns,observations,actions)
+        # step_len=-0.01
         fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
+        fd[self.lr_plh]=step_len
 
-        self.sess.run([self.apply_grads],feed_dict=fd)
+        self.sess.run(self.apply_grads,feed_dict=fd)
+            
+        # kl_test,kl=self.sess.run([self.kl_test,self.kl_div_new],feed_dict=fd2)
 
-        # print("update")
-        sess.run(self.param_assign,feed_dict={plh_key:0.99*p_entry.eval() for plh_key,p_entry in zip(self.p_plh,self.policy.params_list)})
+        # print("kl",kl)
+        # print("kl_test",kl_test)
+        
+        self.sess.run(self.param_assign,feed_dict={plh_key:p_entry.eval() for plh_key,p_entry in zip(self.p_plh,self.policy.params_list)})
         
 
     #goes into TNPG class
-    def buidFeedDict(self,v_init,returns,observations,actions):
-        fd={plh_key:v_entry for plh_key,v_entry in zip(self.v_plh,v_init)}
+    def buidFeedDict(self,v,returns,observations,actions):
+        fd={plh_key:v_entry for plh_key,v_entry in zip(self.v_plh,v)}
         fd[self.policy.input_placeholder]=observations
         fd[self.policy.action_placeholder]=actions
         fd[self.policy.return_placeholder]=returns
@@ -159,51 +233,32 @@ class VPGAgent(object):
         return fd
 
     def computeHessianVector(self,v_init,returns,observations,actions):
-        hv=self.sess.run(self.hv,feed_dict=self.buidFeedDict(v_init,returns,observations,actions))
-        return vectorize.flatten_array_list(hv)
+        v_nested=utils.unflatten_array_list(v_init,self.policy.params_shapes)
+        hv=self.sess.run(self.hv2,feed_dict=self.buidFeedDict(v_nested,returns,observations,actions))
+        return utils.flatten_array_list(hv)
 
     def computeInvFIMProd(self,returns,observations,actions):
         b_nested=self.policy.getSurrLossGrad(returns,observations,actions)
-        b=vectorize.flatten_array_list(b_nested)
-        assert np.isfinite(b.all()), "Surrogate gradient is not finite"
-        x_init=[0.5*np.random.random(s) for s in self.policy.params_shapes]
-        x_flat=vectorize.flatten_array_list(x_init)
+        b=utils.flatten_array_list(b_nested)
+        assert np.isfinite(b).any(), "[CG] policy gradient not finite"
 
-        Ax=self.computeHessianVector(x_init,returns,observations,actions)
-        assert np.isfinite(Ax.all()), "First hessian vector product is not finite"
-
-        d=r_0
-        r=b-Ax
-
-        for i in range(400):
-            d_nested=vectorize.unflatten_array_list(d,self.policy.params_shapes)
-            z=self.computeHessianVector(d_nested,returns,observations,actions)
-            assert np.isfinite(z.all()), "CG hessian vector product is not finite"
-            
-            num=np.dot(r,r)
-            den=np.dot(d,z)
-            alpha=np.true_divide(num,den)
-
-            x_flat=x_flat+alpha*d
-            r_1=r-alpha*z
-
-            assert np.isfinite(x_flat.all()), "CG updated x is not finite"
-
-            num=np.dot(r_1,r_1)
-            den=np.dot(r,r)
-            beta=np.true_divide(num,den)
-
-            d=r_1+beta*d
-
-            assert np.isfinite(d.all()), "CG search direction is not finite"
-
-            res=np.linalg.norm(r_1)
-
-            # print(res)
-        x_out=vectorize.unflatten_array_list(x_flat,self.policy.params_shapes)
+        x_init=[np.zeros(s) for s in self.policy.params_shapes]
+        x_=utils.flatten_array_list(x_init)
 
 
-        return x_out
+        Ax_prod=lambda x:self.computeHessianVector(x,returns,observations,actions)
+        assert np.isfinite(Ax_prod(x_)).any(), "[CG] initial product not finite"
+        
+        x_flat=utils.cg_solve(Ax_prod,b,x_)
+        print("x_flat_cg",x_flat)
+
+        # prod=np.abs(1/np.dot(b,Ax_prod(b)))
+        prod=np.abs(2/np.dot(x_flat,Ax_prod(x_flat)))
+        step_len=np.sqrt(self.params["kl_penalty"]*prod)
+        x_out=utils.unflatten_array_list(x_flat,self.policy.params_shapes)
+        # step_len=1.
+
+        return x_out,step_len
             
         
         
@@ -220,16 +275,20 @@ args = parser.parse_args()
     
 envname=args.env
 env = gym.make(envname)
+# env = normalize(GymEnv(envname))
 # env = normalize(CartpoleEnv())
+# env = normalize(DoublePendulumEnv())
 
 params={
         "Env":'Pendulum-v0',
-        "timesteps":500,#10000,
-        "trajectories":100,
-        "iterations":15,
+        "timesteps":100,#10000,
+        "trajectories":50,
+        "iterations":50,
         "discount":0.99,
         "learningrate":0.01,
-        "init_std":0.99,
+        "init_std":1.,
+        "kl_penalty":0.05,
+        "batch_size":5000,
         "use_baseline":args.baseline,
         "actionsize": env.action_space.shape[0],
         "obssize": env.observation_space.shape[0],
@@ -248,12 +307,15 @@ params={
         "store_video":50
 }
 
-
+print(env.action_space.high[0])
 params["Env"]=envname
 
 tf.reset_default_graph()
 
 with tf.Session() as sess:
+    # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+    # sess.add_tensor_filter("infs", tf_debug.has_inf_or_nan)
+
     
     baseline=linear_baseline.LinearBaseline(sess,env,"linear_baseline",params)
     vpga=VPGAgent(sess,env,params)
@@ -264,7 +326,7 @@ with tf.Session() as sess:
 
     # env = wrappers.Monitor(env, os.path.join(vpga.traindir,'monitor'), video_callable=lambda x:x%params["store_video"]==0)
     
-    env.frame_skip=1
+    # env.frame_skip=1
     
     rp_dtype=params["frame_dtype"]
 
@@ -272,8 +334,8 @@ with tf.Session() as sess:
 
 
 
-    newtensor_plh=tf.placeholder(tf.float32,shape=[params["obssize"],100],name="input_plh")
-    T1_assign=vpga.policy.params_list[0].assign(newtensor_plh)
+    # newtensor_plh=tf.placeholder(tf.float32,shape=[params["obssize"],100],name="input_plh")
+    # T1_assign=vpga.policy.params_list[0].assign(newtensor_plh)
 
         
     c=0
@@ -311,11 +373,12 @@ with tf.Session() as sess:
             base_actions=[]
             ret=0
             done=False
+            spin_once=False
             for t in range(params['timesteps']):
+                
                 action = vpga.takeAction(obsNew)
-                # print(action)
-
                 action=np.array(action).ravel()
+
                 obs, r, done, _ = env.step(action)
 
                 obs=np.array(obs).ravel()
@@ -325,8 +388,9 @@ with tf.Session() as sess:
                 if done:
                     break
                 
-                rewards.append(r)
+                spin_once=True
                 
+                rewards.append(r)
                 base_times.append(t)
                 base_obs.append(obsNew)
                 base_actions.append(action)
@@ -338,44 +402,57 @@ with tf.Session() as sess:
                 ret+=r
                 k+=1
 
-            traj_returns.append(ret)
-            observations.append(np.array(base_obs))
-            actions.append(np.array(base_actions))
-            times.append(base_times)
+            if spin_once:
+                traj_returns.append(ret)
+                observations.append(np.array(base_obs))
+                actions.append(np.array(base_actions))
+                times.append(base_times)
 
-            if params["use_baseline"]:
-                bs=baseline.predict(base_times,base_obs)
-            
-            return_disc=0
-            returns_l=[]
-            adv_l=[]
-            for tx in range(len(rewards)-1,-1,-1):
-                return_disc=rewards[tx]+params['discount']*return_disc
-                returns_l.append(return_disc)
                 if params["use_baseline"]:
-                    adv_l.append(return_disc-bs[tx])
-            returns_l=np.array(returns_l[::-1])
-            adv_l=np.array(adv_l[::-1])
-            
-            adv_l = (adv_l - np.mean(adv_l)) / (np.std(adv_l) + 1e-8)
+                    bs=baseline.predict(base_times,base_obs)
+                
+                return_disc=0
+                returns_l=[]
+                adv_l=[]
+                for tx in range(len(rewards)-1,-1,-1):
+                    return_disc=rewards[tx]+params['discount']*return_disc
+                    returns_l.append(return_disc)
+                    if params["use_baseline"]:
+                        adv_l.append(return_disc-bs[tx])
+                returns_l=np.array(returns_l[::-1])
+                adv_l=np.array(adv_l[::-1])
+                
+                adv_l = (adv_l - np.mean(adv_l)) / (np.std(adv_l) + 1e-8)
 
-            returns.append(returns_l)
-            advantages.append(adv_l)
+                returns.append(returns_l)
+                advantages.append(adv_l)
 
 
         if params["use_baseline"]:
             baseline.fit(returns, observations)
         
         print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(i,rcum/(i+1),c,t))
+        # print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(i,np.sum(np.array(traj_returns).ravel(),-1),c,t))
         
         vpga.assignMetrics(e,feed_dict={vpga.undiscounted_return_plh:rcum/(i+1),
                                       vpga.maxreturn_plh:np.max(traj_returns)})
-
         print("Updating policy...")
+
         obs_batch=np.concatenate([o for o in observations])
         action_batch=np.concatenate([a for a in actions])
         returns_batch=np.concatenate([r for r in returns])
         advantages_batch=np.concatenate([a for a in advantages])
+        batch_len=obs_batch.shape[0]
+        batch_idx=np.arange(batch_len)
+        print("batch_len",batch_len)
+        # if batch_len>params["batch_size"]:
+        #     choice_idx=np.random.choice(batch_idx,params["batch_size"])
+        #     obs_batch=obs_batch[choice_idx,:]
+        #     action_batch=action_batch[choice_idx,:]
+        #     returns_batch=returns_batch[choice_idx]
+        #     if params["use_baseline"]:
+        #         advantages_batch=advantages_batch[choice_idx]
+        
         if params["use_baseline"]:
             vpga.updatePolicy(advantages_batch,obs_batch,action_batch)
         else:
@@ -392,7 +469,7 @@ with tf.Session() as sess:
 
         action=np.array(action).ravel()
         obs, r, done, _ = env.step(action)
-        env.render("human")
+        env.render()
 
         obs=np.array(obs).ravel()
         obsNew=obs

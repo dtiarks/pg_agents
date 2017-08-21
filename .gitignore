@@ -56,3 +56,17 @@ docs/_build/
 
 # PyBuilder
 target/
+
+train_dir/
+
+monitor/
+
+local/
+
+include/
+
+bin/
+
+quiver_plot\.py
+
+MUJOCO_LOG\.TXT
