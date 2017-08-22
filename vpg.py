@@ -178,14 +178,14 @@ class VPGAgent(object):
         fd2[self.policy_old.action_placeholder]=actions
         fd2[self.policy_old.return_placeholder]=returns
         
-        g1=self.sess.run(self.policy.co,feed_dict=fd2)
+        # g1=self.sess.run(self.policy.co,feed_dict=fd2)
         # print("g1",g1)
         step,step_len=self.computeInvFIMProd(returns,observations,actions)
 
         # neg_step=[-1.*s for s in step]
 
         params_backup=[p.eval() for p in self.policy.params_list]
-        step_len=-step_len/5.
+        step_len=-step_len/10.
         print("step_len",step_len)
         for i in range(200):
             fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
@@ -207,10 +207,10 @@ class VPGAgent(object):
         print("steps", i)
         # step=self.policy.getSurrLossGrad(returns,observations,actions)
         # step_len=-0.01
-        fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
-        fd[self.lr_plh]=step_len
+        # fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
+        # fd[self.lr_plh]=step_len
 
-        self.sess.run(self.apply_grads,feed_dict=fd)
+        # self.sess.run(self.apply_grads,feed_dict=fd)
             
         # kl_test,kl=self.sess.run([self.kl_test,self.kl_div_new],feed_dict=fd2)
 
@@ -250,10 +250,9 @@ class VPGAgent(object):
         assert np.isfinite(Ax_prod(x_)).any(), "[CG] initial product not finite"
         
         x_flat=utils.cg_solve(Ax_prod,b,x_)
-        print("x_flat_cg",x_flat)
 
-        # prod=np.abs(1/np.dot(b,Ax_prod(b)))
-        prod=np.abs(2/np.dot(x_flat,Ax_prod(x_flat)))
+        # prod=np.abs(1/np.dot(b,Ax_prod(b)))# TNPG step size
+        prod=np.abs(2/np.dot(x_flat,Ax_prod(x_flat)))# TRPO initial step size
         step_len=np.sqrt(self.params["kl_penalty"]*prod)
         x_out=utils.unflatten_array_list(x_flat,self.policy.params_shapes)
         # step_len=1.
@@ -283,7 +282,7 @@ params={
         "Env":'Pendulum-v0',
         "timesteps":100,#10000,
         "trajectories":50,
-        "iterations":50,
+        "iterations":1000,
         "discount":0.99,
         "learningrate":0.01,
         "init_std":1.,
@@ -336,7 +335,7 @@ with tf.Session() as sess:
 
     # newtensor_plh=tf.placeholder(tf.float32,shape=[params["obssize"],100],name="input_plh")
     # T1_assign=vpga.policy.params_list[0].assign(newtensor_plh)
-
+    overall_return=[]
         
     c=0
     epoche_done=False
@@ -431,6 +430,7 @@ with tf.Session() as sess:
         if params["use_baseline"]:
             baseline.fit(returns, observations)
         
+        overall_return.append(rcum/(i+1))
         print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(i,rcum/(i+1),c,t))
         # print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(i,np.sum(np.array(traj_returns).ravel(),-1),c,t))
         
@@ -459,6 +459,7 @@ with tf.Session() as sess:
             vpga.updatePolicy(returns_batch,obs_batch,action_batch)
 
 
+    env = wrappers.Monitor(env, os.path.join(vpga.traindir,'monitor'), video_callable=lambda x:True)
     obsNew = env.reset()
     obsNew=np.array(obsNew).ravel()
 

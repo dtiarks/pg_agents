@@ -42,7 +42,6 @@ def cg_solve(Ax_prod,b,x_init):
 		p=r+beta*p
 		rsold=rsnew
 
-	print("i:",i)
 	return x
 
 
