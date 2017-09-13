@@ -29,6 +29,10 @@ import matplotlib.pyplot as plt
 import roboschool
 import utils
 
+import pybullet_envs
+import pybullet_envs.bullet.racecarGymEnv as re
+from pybullet_envs.bullet.kukaGymEnv import KukaGymEnv
+
 from tensorflow.python import debug as tf_debug
 
 import gaussian_policy
@@ -93,7 +97,8 @@ class VPGAgent(object):
         hessian_prod=tf.gradients(g_prod,params)
         return hessian_prod
 
-    def _mvn_kl_div(self,a,b):
+
+    def _mvn_kl_div_full(self,a,b):
         co0=a.co
         co1=b.co
         co1_i=tf.matrix_inverse(co1)
@@ -108,6 +113,29 @@ class VPGAgent(object):
         ret=0.5*(A+B-k+C)
         return ret
 
+    def _mvn_kl_div_diag(self,a,b):
+        co0=a.co
+        co1=b.co
+        co0_diag=tf.matrix_diag_part(co0)
+        co1_diag=tf.matrix_diag_part(co1)
+        co1_i=tf.matrix_diag(1./co1_diag)
+        
+        det_co1=tf.reduce_prod(co1_diag,axis=1)
+        det_co0=tf.reduce_prod(co0_diag,axis=1)
+
+        mu=b.means-a.means
+        k=self.params["actionsize"]
+
+        A=tf.trace(tf.matmul(co0,co1_i))
+        B=tf.squeeze(tf.matmul(tf.matmul(tf.expand_dims(mu,1),co1_i),tf.expand_dims(mu,2)),axis=[1,2])
+        
+        C=tf.log(det_co1/det_co0)
+        ret=0.5*(A+B-k+C)
+        return ret
+
+    def _mvn_kl_div(self,a,b):
+        return self._mvn_kl_div_diag(a,b)
+
     def initTraining(self):
         #into policy
         self.p_plh=[
@@ -117,19 +145,15 @@ class VPGAgent(object):
         self.param_assign_new=self.policy.assignParametersOp(self.p_plh)
         
         #stays in algo (only kl div algos)
-        self.kl_div_new=tf.reduce_mean(ds.kl_divergence(self.policy_old.dist,self.policy.dist,allow_nan_stats=False))
-        # self.kl_div_new=tf.reduce_mean(self._kl_div(self.policy_old.dist,self.policy.dist))
-        self.kl_test=tf.reduce_mean(self._mvn_kl_div(self.policy_old,self.policy))
+        self.kl_div=tf.reduce_mean(self._mvn_kl_div(self.policy_old,self.policy))
 
-
-        self.g1=tf.gradients(self.kl_test,self.policy.params_list)
+        # self.g1=tf.gradients(self.kl_test,self.policy.params_list)
 
         #stays in algo (own function?)
         self.v_plh=[
             tf.placeholder(tf.float32,shape=s,name="cg_vector_plh_%d"%i) for i,s in zip(range(len(self.policy.params_shapes)),self.policy.params_shapes)
             ]
-        # self.hv2=_hessian_vector_product(self.kl_div_new,self.policy.params_list, self.v_plh)
-        self.hv2=_hessian_vector_product(self.kl_test,self.policy.params_list, self.v_plh)
+        self.hv2=_hessian_vector_product(self.kl_div,self.policy.params_list, self.v_plh)
 
         #goes into policy
         self.grad_plh=[
@@ -178,33 +202,28 @@ class VPGAgent(object):
         fd2[self.policy_old.action_placeholder]=actions
         fd2[self.policy_old.return_placeholder]=returns
         
-        # g1=self.sess.run(self.policy.co,feed_dict=fd2)
-        # print("g1",g1)
-        step,step_len=self.computeInvFIMProd(returns,observations,actions)
-
-        # neg_step=[-1.*s for s in step]
+        step,step_len=self.computeNaturalGradient(returns,observations,actions)
 
         params_backup=[p.eval() for p in self.policy.params_list]
-        step_len=-step_len/10.
-        print("step_len",step_len)
+        step_len=-self.params["init_step"]
+        
         for i in range(200):
             fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
             fd[self.lr_plh]=step_len
 
             self.sess.run(self.apply_grads,feed_dict=fd)
             
-            # kl_test,kl=self.sess.run([self.kl_test,self.kl_div_new],feed_dict=fd2)
-            kl=self.sess.run(self.kl_test,feed_dict=fd2)
+            kl=self.sess.run(self.kl_div,feed_dict=fd2)
 
             # print("kl",kl)
-            # print("kl_test",kl_test)
+            # print("kl_diag",kl_diag)
             # print("step_len",step_len)
             if kl<self.params["kl_penalty"]:
                 break
 
-            step_len=step_len/1.5
+            step_len=step_len/self.params["beta"]
             self.sess.run(self.param_assign_new,feed_dict={plh_key:p_entry for plh_key,p_entry in zip(self.p_plh,params_backup)})
-        print("steps", i)
+        
         # step=self.policy.getSurrLossGrad(returns,observations,actions)
         # step_len=-0.01
         # fd={plh_key:s for plh_key,s in zip(self.grad_plh,step)}
@@ -212,11 +231,6 @@ class VPGAgent(object):
 
         # self.sess.run(self.apply_grads,feed_dict=fd)
             
-        # kl_test,kl=self.sess.run([self.kl_test,self.kl_div_new],feed_dict=fd2)
-
-        # print("kl",kl)
-        # print("kl_test",kl_test)
-        
         self.sess.run(self.param_assign,feed_dict={plh_key:p_entry.eval() for plh_key,p_entry in zip(self.p_plh,self.policy.params_list)})
         
 
@@ -237,7 +251,7 @@ class VPGAgent(object):
         hv=self.sess.run(self.hv2,feed_dict=self.buidFeedDict(v_nested,returns,observations,actions))
         return utils.flatten_array_list(hv)
 
-    def computeInvFIMProd(self,returns,observations,actions):
+    def computeNaturalGradient(self,returns,observations,actions):
         b_nested=self.policy.getSurrLossGrad(returns,observations,actions)
         b=utils.flatten_array_list(b_nested)
         assert np.isfinite(b).any(), "[CG] policy gradient not finite"
@@ -255,7 +269,6 @@ class VPGAgent(object):
         prod=np.abs(2/np.dot(x_flat,Ax_prod(x_flat)))# TRPO initial step size
         step_len=np.sqrt(self.params["kl_penalty"]*prod)
         x_out=utils.unflatten_array_list(x_flat,self.policy.params_shapes)
-        # step_len=1.
 
         return x_out,step_len
             
@@ -274,20 +287,21 @@ args = parser.parse_args()
     
 envname=args.env
 env = gym.make(envname)
-# env = normalize(GymEnv(envname))
-# env = normalize(CartpoleEnv())
-# env = normalize(DoublePendulumEnv())
+# env = re.RacecarGymEnv(isDiscrete=False ,renders=True)
+# env = KukaGymEnv(renders=True)
 
 params={
         "Env":'Pendulum-v0',
-        "timesteps":100,#10000,
-        "trajectories":50,
-        "iterations":1000,
+        "timesteps":2000,#10000,
+        "trajectories":100,
+        "iterations":600,
         "discount":0.99,
         "learningrate":0.01,
         "init_std":1.,
-        "kl_penalty":0.05,
-        "batch_size":5000,
+        "init_step":0.05,
+        "kl_penalty":0.1,
+        "beta":1.5,
+        "batch_size":50000,
         "use_baseline":args.baseline,
         "actionsize": env.action_space.shape[0],
         "obssize": env.observation_space.shape[0],
@@ -306,7 +320,6 @@ params={
         "store_video":50
 }
 
-print(env.action_space.high[0])
 params["Env"]=envname
 
 tf.reset_default_graph()
@@ -323,26 +336,17 @@ with tf.Session() as sess:
     np.save(os.path.join(vpga.traindir,'params_dict.npy'), params)
     epoche_name=os.path.join(vpga.traindir,"epoche_stats.tsv")
 
-    # env = wrappers.Monitor(env, os.path.join(vpga.traindir,'monitor'), video_callable=lambda x:x%params["store_video"]==0)
-    
-    # env.frame_skip=1
     
     rp_dtype=params["frame_dtype"]
 
     fshape=params["obssize"]
 
-
-
-    # newtensor_plh=tf.placeholder(tf.float32,shape=[params["obssize"],100],name="input_plh")
-    # T1_assign=vpga.policy.params_list[0].assign(newtensor_plh)
     overall_return=[]
         
     c=0
     epoche_done=False
     rs=[]
     for e in range(params['iterations']):
-        print("Starting iteration {}".format(e))
-        
         paths = []
         returns=[]#np.empty((params['trajectories']*params['timesteps']))
         observations=[]#np.empty((params['trajectories']*params['timesteps'],params["obssize"]))
@@ -355,14 +359,7 @@ with tf.Session() as sess:
         t1=time.clock()
         k=0
         rcum=0
-        for i in range(params['trajectories']):
-            video=False
-            
-            if i%params["store_video"]==0:
-                video=True
-                # os.mkdir(os.path.join(vpga.traindir,'monitor_%d_%d'%(e,i)))
-                # video_recorder = gym.monitoring.video_recorder.VideoRecorder(env=env, base_path=('monitor%d'%i), enabled=True)
-            
+        for i in range(1000*params['trajectories']):
             obsNew = env.reset()
             obsNew=np.array(obsNew).ravel()
             
@@ -383,7 +380,7 @@ with tf.Session() as sess:
                 obs=np.array(obs).ravel()
                 # if i==0:
                 #     env.render()
-
+                # env.render()
                 if done:
                     break
                 
@@ -400,6 +397,7 @@ with tf.Session() as sess:
                 rcum+=r
                 ret+=r
                 k+=1
+
 
             if spin_once:
                 traj_returns.append(ret)
@@ -426,17 +424,20 @@ with tf.Session() as sess:
                 returns.append(returns_l)
                 advantages.append(adv_l)
 
+            
+            if k>params['batch_size']:
+                print("k",k)
+                break
+
 
         if params["use_baseline"]:
             baseline.fit(returns, observations)
         
         overall_return.append(rcum/(i+1))
-        print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(i,rcum/(i+1),c,t))
-        # print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(i,np.sum(np.array(traj_returns).ravel(),-1),c,t))
+        print("\r[Iter: {} || Reward: {} || Frame: {} || Steps: {}]".format(e,rcum/(i+1),c,t))
         
         vpga.assignMetrics(e,feed_dict={vpga.undiscounted_return_plh:rcum/(i+1),
                                       vpga.maxreturn_plh:np.max(traj_returns)})
-        print("Updating policy...")
 
         obs_batch=np.concatenate([o for o in observations])
         action_batch=np.concatenate([a for a in actions])
@@ -444,143 +445,37 @@ with tf.Session() as sess:
         advantages_batch=np.concatenate([a for a in advantages])
         batch_len=obs_batch.shape[0]
         batch_idx=np.arange(batch_len)
-        print("batch_len",batch_len)
-        # if batch_len>params["batch_size"]:
-        #     choice_idx=np.random.choice(batch_idx,params["batch_size"])
-        #     obs_batch=obs_batch[choice_idx,:]
-        #     action_batch=action_batch[choice_idx,:]
-        #     returns_batch=returns_batch[choice_idx]
-        #     if params["use_baseline"]:
-        #         advantages_batch=advantages_batch[choice_idx]
         
+        t1=time.clock()
         if params["use_baseline"]:
             vpga.updatePolicy(advantages_batch,obs_batch,action_batch)
         else:
             vpga.updatePolicy(returns_batch,obs_batch,action_batch)
+        t2=time.clock()
+        dt=(t2-t1)
+        print("update time",dt)
 
-
-    env = wrappers.Monitor(env, os.path.join(vpga.traindir,'monitor'), video_callable=lambda x:True)
     obsNew = env.reset()
     obsNew=np.array(obsNew).ravel()
+    video_recorder = gym.monitoring.video_recorder.VideoRecorder(env=env, base_path=(os.path.join(vpga.traindir,envname)), enabled=True)
 
-    for t in range(100*params['timesteps']):
+    for t in range(50*params['timesteps']):
         done=False
-                    
+                        
         action = vpga.takeAction(obsNew)
 
         action=np.array(action).ravel()
         obs, r, done, _ = env.step(action)
-        env.render()
+        # env.render("human")
+        video_recorder.capture_frame()
 
         obs=np.array(obs).ravel()
         obsNew=obs
 
         if done:
             break
-
-
-
-    # num=10
-    # ret_t=0
-
-    # rets_arr=np.zeros((num,num))
-
-    # p1_arr=np.zeros((num,num))
-    # p2_arr=np.zeros((num,num))
-
-    # grad1_arr=np.zeros((num,num))
-    # grad2_arr=np.zeros((num,num))
-
-    # T1=sess.run(vpga.policy.params_list[0])
-
-    # param_range1=np.linspace(T1[0,5]-0.8*T1[0,5],T1[0,5]+0.8*T1[0,5],num)
-    # param_range2=np.linspace(T1[0,6]-0.8*T1[0,6],T1[0,6]+0.8*T1[0,6],num)
-
-    # for i,p1 in np.ndenumerate(param_range1):
-    #     for j,p2 in np.ndenumerate(param_range2):
-    #         print((i,j))
-
-    #         p1_arr[i,j]=p1
-    #         p2_arr[i,j]=p2
-
-    #         T1=sess.run(vpga.policy.params_list[0])
-    #         T1[0,5]=p1
-    #         T1[0,6]=p2
-
-    #         sess.run(T1_assign,feed_dict={newtensor_plh:T1})
-
-
-    #         returns=[]#np.empty((params['trajectories']*params['timesteps']))
-    #         returns_mean=[]#np.empty((params['trajectories']*params['timesteps']))
-    #         observations=[]#np.empty((params['trajectories']*params['timesteps'],params["obssize"]))
-    #         actions=[]#np.empty((params['trajectories']*params['timesteps'],params["actionsize"]))
-
-    #         traj_returns=[]
-            
-    #         t1=time.clock()
-    #         k=0
-    #         rcum=0
-    #         for _ in range(params['trajectories']):
-    #             obsNew = env.reset()
-    #             obsNew=np.array(obsNew).ravel()
-                
-    #             rewards=[]
-    #             ret=0
-    #             for t in range(100*params['timesteps']):
-    #                 done=False
-                    
-    #                 action = vpga.takeAction(obsNew)
-
-    #                 action=np.array(action).ravel()
-    #                 obs, r, done, _ = env.step(action)
-
-    #                 obs=np.array(obs).ravel()
-
-
-    #                 if done:
-    #                     break
-                    
-    #                 rewards.append(r)
-    #                 observations.append(obs)
-    #                 actions.append(action)
-
-    #                 obsNew=obs
-                        
-    #                 c+=1
-    #                 rcum+=r
-    #                 ret+=r
-    #                 k+=1
-
-    #             traj_returns.append(ret)
-
-    #             return_disc=0
-    #             returns_l=[]
-    #             for tx in range(len(rewards)-1,-1,-1):
-    #                 return_disc=rewards[tx]+params['discount']*return_disc
-    #                 returns_l.append(return_disc)
-    #             returns_l=returns_l[::-1]
-
-    #             for rx in returns_l:
-    #                 returns.append(np.array(rx))
-
-    #             returns_mean.append(returns_l[0])
-
-    #         rets_arr[i,j]=np.mean(returns_mean)
-
-    #         returns=np.expand_dims(returns, axis=1)
-    #         grads=vpga.policy.getSurrLossGrad(np.array(returns),np.array(observations),np.array(actions))
-    #         grad1_arr[i,j]=grads[0][0][5]
-    #         grad2_arr[i,j]=grads[0][0][6]
-
-
-    # plt.subplot(211)
-    # plt.imshow(rets_arr, interpolation='bicubic')
-
-    # plt.subplot(212)
-    # plt.quiver(p1_arr,p2_arr,grad1_arr,grad2_arr,rets_arr)
-    # plt.show()
-
-    
+        
+    video_recorder.close()
     env.close()
 
 # if __name__ == '__main__':      

@@ -17,17 +17,14 @@ class GaussPolicy(object):
         self.sess=sess
         self.name=name
         self.env=env
-        self.input_shape=[None ,self.params["obssize"]] #add to hyperparamters
+        self.input_shape=[None ,self.params["obssize"]]
+        
         with tf.name_scope(self.name):
             self.input_placeholder = tf.placeholder(tf.float32,shape=self.input_shape,name="input_plh")
             self.reward_placeholder = tf.placeholder(tf.float32,shape=[None,],name="reward_plh")
             self.return_placeholder = tf.placeholder(tf.float32,shape=[None,],name="returnplh")
             self.action_placeholder = tf.placeholder(tf.float32,shape=[None,self.params["actionsize"]],name="action_plh")
             
-            # self.input_shape=[None, kl_samples ,self.params["obssize"]] #add to hyperparamters
-            # self.kl_input_placeholder = tf.placeholder(tf.float32,shape=self.input_shape,name="kl_input_plh")
-            # self.kl_action_placeholder = tf.placeholder(tf.float32,shape=[None,kl_samples,self.params["actionsize"]],name="kl_action_plh")
-            # self.kl_return_placeholder = tf.placeholder(tf.float32,shape=[None,kl_samples,],name="kl_returnplh")
         
         self.train=train
         
@@ -43,7 +40,6 @@ class GaussPolicy(object):
             self.dist=ds.Normal(loc=self.scaled_out,scale=tf.exp(self.log_std),allow_nan_stats=False)
         elif self.params["actionsize"] > 1:
             self.dist=ds.MultivariateNormalDiag(loc=self.scaled_out,scale_diag=tf.exp(self.log_std),allow_nan_stats=False)
-            # self.dist=ds.Normal(loc=self.scaled_out,scale=tf.exp(self.log_std),allow_nan_stats=False)
             self.co=self.dist.covariance()
         else:
             raise ValueError("Invalid action dimension")
@@ -61,7 +57,6 @@ class GaussPolicy(object):
 
         self.lgrad=tf.gradients(self.lp, self.params_list)
 
-        print(self.lp.shape)
         self.surr_loss=tf.reduce_mean(self.lp*self.return_placeholder)
 
         self.surr_gradient = tf.gradients(self.surr_loss, self.params_list)
