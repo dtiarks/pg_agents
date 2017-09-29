@@ -70,3 +70,5 @@ bin/
 quiver_plot\.py
 
 MUJOCO_LOG\.TXT
+
+training/
