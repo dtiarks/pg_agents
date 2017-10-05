@@ -39,5 +39,6 @@ class TRPO(TNPG):
             self.sess.run(self.param_assign_new,
                           feed_dict={plh_key: p_entry for plh_key, p_entry in zip(self.p_plh, params_backup)})
 
+
         self.sess.run(self.param_assign, feed_dict={plh_key: p_entry.eval() for plh_key, p_entry in
                                                     zip(self.p_plh, self.policy.params_list)})

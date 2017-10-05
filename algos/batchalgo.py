@@ -11,12 +11,13 @@ from pg_agents.policies.gaussian_policy import GaussPolicy
 
 class BatchAlgo(object):
     # TODO: Add checkpoint saver
-    def __init__(self, sess, env, params):
+    def __init__(self, sess, env, params, actiondim=1):
         self.params = params
         self.cnt = 0
         self.env = env
         self.sess = sess
         self.current_loss = 0
+        self.actiondim = actiondim
         self.input_shape = [None, self.params["obssize"]]
 
         #        self.run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
@@ -56,17 +57,17 @@ class BatchAlgo(object):
         self.input_placeholder = tf.placeholder(tf.float32, shape=self.input_shape, name="input_plh")
         self.reward_placeholder = tf.placeholder(tf.float32, shape=[None, ], name="reward_plh")
         self.return_placeholder = tf.placeholder(tf.float32, shape=[None, ], name="returnplh")
-        self.action_placeholder = tf.placeholder(tf.float32, shape=[None, self.params["actionsize"]], name="action_plh")
+        self.action_placeholder = tf.placeholder(tf.float32, shape=[None, self.actiondim], name="action_plh")
 
     def init_policy(self):
         self.policy = GaussPolicy(self.sess, self.env, "gaussian_policy", self.input_placeholder,
-                                  self.action_placeholder, self.params)
+                                  self.action_placeholder, self.params, actiondim=self.actiondim)
         self.policy_old = GaussPolicy(self.sess, self.env, "gaussian_policy_old", self.input_placeholder,
                                       self.action_placeholder, self.params,
-                                      train=False)
+                                      train=False, actiondim=self.actiondim)
 
     def init_loss(self):
-        self.kl_div = tf.reduce_mean(kl_div(self.policy_old, self.policy, self.params["actionsize"]))
+        self.kl_div = tf.reduce_mean(kl_div(self.policy_old, self.policy, self.actiondim))
 
         self.loss = tf.reduce_mean(self.policy.lp * self.return_placeholder)
 
@@ -87,8 +88,8 @@ class BatchAlgo(object):
             tf.placeholder(tf.float32, shape=s, name="assign_plh_%d" % i) for i, s in
             zip(range(len(self.policy.params_shapes)), self.policy.params_shapes)
         ]
-        self.param_assign = self.policy_old.assignParametersOp(self.p_plh)
-        self.param_assign_new = self.policy.assignParametersOp(self.p_plh)
+        self.param_assign = self.policy_old.assign_parameters_op(self.p_plh)
+        self.param_assign_new = self.policy.assign_parameters_op(self.p_plh)
 
         self.v_plh = [
             tf.placeholder(tf.float32, shape=s, name="cg_vector_plh_%d" % i) for i, s in
@@ -97,7 +98,7 @@ class BatchAlgo(object):
         self.init_gradients()
 
         self.lr_plh = tf.placeholder(tf.float32, name="learningrate_plh")
-        self.optimizer = tf.train.AdamOptimizer(self.lr_plh)
+        self.optimizer = tf.train.AdamOptimizer(self.lr_plh, epsilon=self.params["adam_eps"])
         self.apply_grads = self.optimizer.apply_gradients(zip(self.grad_plh, self.policy.params_list))
         self.minimize = self.optimizer.minimize(self.loss, var_list=self.policy.params_list)
 
@@ -110,12 +111,22 @@ class BatchAlgo(object):
         self.maxreturn_plh = tf.placeholder(tf.float32, name="maxreturn_plh")
         self.maxret_op = self.maxreturn.assign(self.maxreturn_plh)
 
+        self.meanadv = tf.Variable(0, name="meanadv", dtype=tf.float32, trainable=False)
+        self.meanadv_plh = tf.placeholder(tf.float32, name="meanadv_plh")
+        self.meanadv_op = self.meanadv.assign(self.meanadv_plh)
+
+        self.loss_summ = tf.Variable(0, name="loss_summ", dtype=tf.float32, trainable=False)
+        self.loss_summ_plh = tf.placeholder(tf.float32, name="loss_summ_plh")
+        self.loss_summ_op = self.loss_summ.assign(self.loss_summ_plh)
+
         with tf.name_scope("stats"):
             tf.summary.scalar('return', self.undiscounted_return)
             tf.summary.scalar('maxreturn', self.maxreturn)
+            tf.summary.scalar('meanadv', self.meanadv)
+            tf.summary.scalar('loss_summ', self.loss_summ)
 
     def assign_metrics(self, step, feed_dict):
-        _, _, summary = self.sess.run([self.ur_assign_op, self.maxret_op, self.merged], feed_dict=feed_dict)
+        _, _,_, _, summary = self.sess.run([self.loss_summ_op, self.meanadv_op, self.ur_assign_op, self.maxret_op, self.merged], feed_dict=feed_dict)
 
         self.train_writer.add_summary(summary, step)
 

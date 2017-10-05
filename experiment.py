@@ -5,6 +5,7 @@ import time
 import os
 import sys
 import pylab as plt
+import importlib
 
 import gym
 import roboschool
@@ -23,12 +24,10 @@ from pg_agents.gae.gae import GAE
 
 
 def train_experiment(env, sess, algo, params):
-    agent = algo(sess, env, params)
-
-    params["actionsize"] = 1
+    agent = algo(sess, env, params, actiondim=params["actionsize"])
     gae = GAE(sess, env, params)
 
-    sess.graph.finalize()
+    # sess.graph.finalize()
 
     overall_return = []
 
@@ -42,6 +41,7 @@ def train_experiment(env, sess, algo, params):
         num_steps = []
 
         traj_returns = []
+        traj_adv = []
         preds = []
         mean_disc_returns = []
 
@@ -57,6 +57,7 @@ def train_experiment(env, sess, algo, params):
             base_obs2 = []
             base_times = []
             base_actions = []
+            dones = []
             ret = 0
             done = False
             spin_once = False
@@ -81,6 +82,7 @@ def train_experiment(env, sess, algo, params):
                 base_obs.append(obs_new)
                 base_obs2.append(obs)
                 base_actions.append(action)
+                dones.append(float(done))
 
                 obs_new = obs
 
@@ -108,7 +110,7 @@ def train_experiment(env, sess, algo, params):
                 adv_l = []
                 for tx in range(len(rewards) - 1, -1, -1):
                     if params["use_gae"]:
-                        dt_err = rewards[tx] + params['discount'] * v_gae2[tx] - v_gae[tx]
+                        dt_err = rewards[tx] + params['discount'] * v_gae2[tx] * (1 - dones[tx]) - v_gae[tx]
                         adv = adv * (params['discount'] * params['lambda_gae']) + dt_err
                         adv_l.append(adv)
 
@@ -119,8 +121,10 @@ def train_experiment(env, sess, algo, params):
                 adv_l = np.array(adv_l[::-1])
 
                 mean_disc_returns.append(returns_l[0])
+                traj_adv.append(np.mean(adv_l))
 
-                adv_l = (adv_l - np.mean(adv_l)) / (np.std(adv_l) + 1e-8)
+                if params["normalize_gae"]:
+                    adv_l = (adv_l - np.mean(adv_l)) / (np.std(adv_l) + 1e-8)
 
                 returns.append(returns_l)
                 advantages.append(adv_l)
@@ -129,21 +133,22 @@ def train_experiment(env, sess, algo, params):
                 break
 
         overall_return.append(rcum / (i + 1))
-        # gae_loss = gae.get_loss()
 
         mean_num_steps = np.mean(num_steps)
         print(
             "\r[Iter: {} || Reward: {:.2f} || Total: {} || Steps: {:.2f}]".format(e, rcum / (i + 1), c, mean_num_steps))
-        print("Pred:", np.mean(preds))
-        print("Disc:", np.mean(mean_disc_returns))
-
-        agent.assign_metrics(e, feed_dict={agent.undiscounted_return_plh: rcum / (i + 1),
-                                           agent.maxreturn_plh: np.max(traj_returns)})
 
         obs_batch = np.concatenate([o for o in observations])
         action_batch = np.concatenate([a for a in actions])
         returns_batch = np.concatenate([r for r in returns])
         advantages_batch = np.concatenate([a for a in advantages])
+
+        gae_loss = gae.get_loss(returns_batch, obs_batch, np.expand_dims(returns_batch, 1))
+
+        agent.assign_metrics(e, feed_dict={agent.undiscounted_return_plh: rcum / (i + 1),
+                                           agent.maxreturn_plh: np.max(traj_returns),
+                                           agent.meanadv_plh: np.mean(traj_adv),
+                                           agent.loss_summ_plh: gae_loss})
 
         t1 = time.clock()
         if params["use_gae"]:
@@ -169,9 +174,9 @@ def run_experiment(env, sess, agent, params):
     """
     obs_new = env.reset()
     obs_new = np.array(obs_new).ravel()
-    video_recorder = gym.monitoring.video_recorder.VideoRecorder(env=env,
-                                                                 base_path=(os.path.join(agent.traindir, envname)),
-                                                                 enabled=True)
+    # video_recorder = gym.monitoring.video_recorder.VideoRecorder(env=env,
+    #                                                              base_path=(os.path.join(agent.traindir, envname)),
+    #                                                              enabled=True)
 
     for t in range(50 * params['timesteps']):
         done = False
@@ -180,8 +185,8 @@ def run_experiment(env, sess, agent, params):
 
         action = np.array(action).ravel()
         obs, r, done, _ = env.step(action)
-        # env.render("human")
-        video_recorder.capture_frame()
+        env.render("human")
+        # video_recorder.capture_frame()
 
         obs = np.array(obs).ravel()
         obs_new = obs
@@ -189,7 +194,7 @@ def run_experiment(env, sess, agent, params):
         if done:
             break
 
-    video_recorder.close()
+            # video_recorder.close()
 
 
 if __name__ == '__main__':
@@ -209,20 +214,22 @@ if __name__ == '__main__':
         "Env": envname,
         "timesteps": 2000,  # 10000,
         "trajectories": 2000,
-        "iterations": 1200,
+        "iterations": 500,
         "discount": 0.99,
         "learningrate": 3e-4,
+        "adam_eps": 1e-5,
         "init_std": 1.,
         "init_step": 0.05,
-        "kl_penalty": 0.1,
+        "kl_penalty": 0.03,
         "beta": 1.5,
         "linearsearch_steps": 50,
         "eps": 0.2,
-        "batch_size": 15000,
-        "mini_batch_size": 256,
-        "epochs": 32,
+        "batch_size": 25240,
+        "mini_batch_size": 512,
+        "epochs": 10,
         "use_gae": True,
         "lambda_gae": 0.95,
+        "normalize_gae": True,
         "actionsize": env.action_space.shape[0],
         "obssize": env.observation_space.shape[0],
         "traindir": "./train_dir",
@@ -240,15 +247,18 @@ if __name__ == '__main__':
 
     with tf.Session() as sess:
         return1, agent1 = train_experiment(env, sess, TRPO, params)
+        env.close()
+
+        # env = gym.make(envname)
+        # return2, agent2 = train_experiment(env, sess, TRPO, params)
+        # env.close()
+
+        env = gym.make(envname)
         run_experiment(env, sess, agent1, params)
+        env.close()
 
-    # tf.reset_default_graph()
-    # with tf.Session() as sess:
-    #     params["mini_batch_size"] = 64
-    #     return2, agent2 = train_experiment(env, sess, PPO, params)
-
-    env.close()
-
-    plt.plot(return1)
-    # plt.plot(return2)
+    plt.title("TRPO\nEnv: {}".format(params["Env"]))
+    plt.plot(return1, label="PPO")
+    # plt.plot(return2, label="TRPO")
+    plt.legend()
     plt.show()
