@@ -34,6 +34,8 @@ class BatchAlgo(object):
         os.mkdir(checkpoint_dir)
 
         self.saver = tf.train.Saver()
+        self.checkpoint_file = os.path.join(self.traindir, self.params['checkpoint_dir'], 'checkpoint')
+
 
         if params["latest_run"]:
             self.latest_traindir = os.path.join(params['traindir'], "run_%s" % params["latest_run"])
@@ -124,6 +126,11 @@ class BatchAlgo(object):
             tf.summary.scalar('maxreturn', self.maxreturn)
             tf.summary.scalar('meanadv', self.meanadv)
             tf.summary.scalar('loss_summ', self.loss_summ)
+
+    def save_check_point(self):
+        name = self.saver.save(self.sess, self.checkpoint_file, global_step=0)
+
+        print("Saving checkpoint: %s" % name)
 
     def assign_metrics(self, step, feed_dict):
         _, _,_, _, summary = self.sess.run([self.loss_summ_op, self.meanadv_op, self.ur_assign_op, self.maxret_op, self.merged], feed_dict=feed_dict)

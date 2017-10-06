@@ -13,3 +13,4 @@ The idea behind pg_agents is to provide an easy to understand python package con
 - __GAE: Generalized Advantage Estimator__ Method to estimate the advantage function from experience. Helps to reduce the variance of the gradient estimator.
 
 - __PPO: Proximal Policy Optimization__ Simple but efficient extension of VPG.
+

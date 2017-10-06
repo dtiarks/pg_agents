@@ -1,3 +1,5 @@
+from builtins import print
+
 import tensorflow as tf
 import numpy as np
 
@@ -5,7 +7,6 @@ from pg_agents.algos.tnpg import TNPG
 
 
 class TRPO(TNPG):
-
     def compute_step_len(self, x, b, hv_prod):
         prod = np.abs(2 / np.dot(x, hv_prod(x)))
         l = np.sqrt(self.params["kl_penalty"] * prod)
@@ -38,7 +39,6 @@ class TRPO(TNPG):
             step_len = step_len / self.params["beta"]
             self.sess.run(self.param_assign_new,
                           feed_dict={plh_key: p_entry for plh_key, p_entry in zip(self.p_plh, params_backup)})
-
 
         self.sess.run(self.param_assign, feed_dict={plh_key: p_entry.eval() for plh_key, p_entry in
                                                     zip(self.p_plh, self.policy.params_list)})

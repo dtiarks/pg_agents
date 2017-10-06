@@ -21,11 +21,13 @@ from pg_agents.algos.tnpg import TNPG
 from pg_agents.algos.trpo import TRPO
 from pg_agents.algos.ppo import PPO
 from pg_agents.gae.gae import GAE
+from pg_agents.gae.linear_baseline import LinearBaseline
 
 
 def train_experiment(env, sess, algo, params):
     agent = algo(sess, env, params, actiondim=params["actionsize"])
     gae = GAE(sess, env, params)
+    baseline = LinearBaseline(sess, env, "linear_baseline", params)
 
     # sess.graph.finalize()
 
@@ -99,6 +101,9 @@ def train_experiment(env, sess, algo, params):
                 actions.append(np.array(base_actions))
                 times.append(base_times)
 
+                if params["use_linear_baseline"]:
+                    bs = baseline.predict(base_times, base_obs)
+
                 if params["use_gae"]:
                     v_gae = gae.get_mean(base_obs)[:, 0]
                     v_gae2 = gae.get_mean(base_obs2)[:, 0]
@@ -116,6 +121,9 @@ def train_experiment(env, sess, algo, params):
 
                     return_disc = rewards[tx] + params['discount'] * return_disc
                     returns_l.append(return_disc)
+
+                    if params["use_linear_baseline"] and not params["use_gae"]:
+                        adv_l.append(return_disc - bs[tx])
 
                 returns_l = np.array(returns_l[::-1])
                 adv_l = np.array(adv_l[::-1])
@@ -155,10 +163,18 @@ def train_experiment(env, sess, algo, params):
             agent.update_policy(advantages_batch, obs_batch, action_batch)
             gae.update_policy(returns_batch, obs_batch, np.expand_dims(returns_batch, 1))
         else:
-            agent.update_policy(returns_batch, obs_batch, action_batch)
+            if params["use_linear_baseline"]:
+                baseline.fit(returns, observations)
+                agent.update_policy(advantages_batch, obs_batch, action_batch)
+            else:
+                agent.update_policy(returns_batch, obs_batch, action_batch)
+
         t2 = time.clock()
         dt = (t2 - t1)
         print("update time", dt)
+
+    agent.save_check_point()
+    gae.save_check_point()
 
     return overall_return, agent
 
@@ -174,9 +190,9 @@ def run_experiment(env, sess, agent, params):
     """
     obs_new = env.reset()
     obs_new = np.array(obs_new).ravel()
-    # video_recorder = gym.monitoring.video_recorder.VideoRecorder(env=env,
-    #                                                              base_path=(os.path.join(agent.traindir, envname)),
-    #                                                              enabled=True)
+    video_recorder = gym.monitoring.video_recorder.VideoRecorder(env=env,
+                                                                 base_path=(os.path.join(agent.traindir, envname)),
+                                                                 enabled=True)
 
     for t in range(50 * params['timesteps']):
         done = False
@@ -185,8 +201,8 @@ def run_experiment(env, sess, agent, params):
 
         action = np.array(action).ravel()
         obs, r, done, _ = env.step(action)
-        env.render("human")
-        # video_recorder.capture_frame()
+        # env.render("human")
+        video_recorder.capture_frame()
 
         obs = np.array(obs).ravel()
         obs_new = obs
@@ -194,7 +210,7 @@ def run_experiment(env, sess, agent, params):
         if done:
             break
 
-            # video_recorder.close()
+    video_recorder.close()
 
 
 if __name__ == '__main__':
@@ -216,19 +232,20 @@ if __name__ == '__main__':
         "trajectories": 2000,
         "iterations": 500,
         "discount": 0.99,
-        "learningrate": 3e-4,
+        "learningrate": 0.01,
         "adam_eps": 1e-5,
         "init_std": 1.,
         "init_step": 0.05,
-        "kl_penalty": 0.03,
-        "beta": 1.5,
+        "kl_penalty": 0.1,
+        "beta": 1.75,
         "linearsearch_steps": 50,
         "eps": 0.2,
-        "batch_size": 25240,
-        "mini_batch_size": 512,
-        "epochs": 10,
-        "use_gae": True,
-        "lambda_gae": 0.95,
+        "batch_size": 25000,
+        "mini_batch_size": 64,
+        "epochs": 5,
+        "use_linear_baseline": True,
+        "use_gae": False,
+        "lambda_gae": 0.97,
         "normalize_gae": True,
         "actionsize": env.action_space.shape[0],
         "obssize": env.observation_space.shape[0],
@@ -241,13 +258,14 @@ if __name__ == '__main__':
         "action_bound": env.action_space.high[0],
         "store_video": 50
     }
-    np.save(os.path.join(params["traindir"], 'params_dict.npy'), params)
 
     tf.reset_default_graph()
 
     with tf.Session() as sess:
         return1, agent1 = train_experiment(env, sess, TRPO, params)
         env.close()
+
+        np.save(os.path.join(agent1.traindir, 'params_dict.npy'), params)
 
         # env = gym.make(envname)
         # return2, agent2 = train_experiment(env, sess, TRPO, params)
@@ -258,7 +276,7 @@ if __name__ == '__main__':
         env.close()
 
     plt.title("TRPO\nEnv: {}".format(params["Env"]))
-    plt.plot(return1, label="PPO")
+    plt.plot(return1, label="TRPO")
     # plt.plot(return2, label="TRPO")
     plt.legend()
     plt.show()

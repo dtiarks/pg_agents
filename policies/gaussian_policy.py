@@ -18,7 +18,7 @@ class GaussPolicy(object):
         self.name = name
         self.env = env
         self.adapt_std = True
-        self.actiondim=actiondim
+        self.actiondim = actiondim
 
         self.train = train
 
@@ -63,21 +63,21 @@ class GaussPolicy(object):
 
         with tf.name_scope(self.name):
             with tf.name_scope('fc1'):
-                self.W_fc1 = self._weight_variable([self.params["obssize"], 60], "W_fc1", vals=(
+                self.W_fc1 = self._weight_variable([self.params["obssize"], 64], "W_fc1", vals=(
                     -1. / np.sqrt(self.params["obssize"]), 1. / np.sqrt(self.params["obssize"])))
                 self.params_list.append(self.W_fc1)
 
-                self.b_fc1 = self._bias_variable([60], "b_fc1", vals=(-0.01, 0.0001))
+                self.b_fc1 = self._bias_variable([64], "b_fc1", vals=(-0.01, 0.0001))
                 self.params_list.append(self.b_fc1)
 
                 h_fc1 = tf.nn.tanh(tf.matmul(input_layer, self.W_fc1) + self.b_fc1)
                 # h_fc1 = tf.matmul(input_layer, self.W_fc1) + self.b_fc1
 
             with tf.name_scope('fc2'):
-                self.W_fc2 = self._weight_variable([60, 60], "W_fc2", vals=(-0.01, np.sqrt(1 / 60.)))
+                self.W_fc2 = self._weight_variable([64, 64], "W_fc2", vals=(-0.01, np.sqrt(1 / 64.)))
                 self.params_list.append(self.W_fc2)
 
-                self.b_fc2 = self._bias_variable([60], "b_fc2", vals=(-0.01, 0.0001))
+                self.b_fc2 = self._bias_variable([64], "b_fc2", vals=(-0.01, 0.0001))
                 self.params_list.append(self.b_fc2)
 
                 h_fc2 = tf.nn.tanh(tf.matmul(h_fc1, self.W_fc2) + self.b_fc2)
@@ -93,8 +93,8 @@ class GaussPolicy(object):
 
 
             with tf.name_scope('output'):
-                self.W_fc4 = self._weight_variable([60, self.actiondim], "W_out",
-                                                   vals=(-0.01, np.sqrt(1 / 60.)))
+                self.W_fc4 = self._weight_variable([64, self.actiondim], "W_out",
+                                                   vals=(-0.01, np.sqrt(1 / 64.)))
                 self.params_list.append(self.W_fc4)
 
                 self.b_fc4 = self._bias_variable([self.actiondim], "b_out", vals=(-0.01, 0.01))
@@ -108,7 +108,7 @@ class GaussPolicy(object):
                         tf.constant(self.params["init_std"], shape=[self.actiondim], dtype=tf.float32),
                         trainable=self.train, name="b_fc_std")
                     self.params_list.append(self.b_fc_std)
-                    self.log_std = tf.log(tf.clip_by_value(self.b_fc_std + 0 * self.out, 1e-8, 1e3))
+                    self.log_std = tf.log(self.b_fc_std + 0 * self.out)
 
             # self.scaled_out=tf.nn.tanh(self.out)
             self.scaled_out = self.out
