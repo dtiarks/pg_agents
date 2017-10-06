@@ -14,3 +14,9 @@ The idea behind pg_agents is to provide an easy to understand python package con
 
 - __PPO: Proximal Policy Optimization__ Simple but efficient extension of VPG.
 
+## Examples
+
+- Robotschool Ant
+
+[![Ant](https://img.youtube.com/vi/gg0DCPtxBwo/0.jpg)](https://www.youtube.com/watch?v=gg0DCPtxBwo)
+
