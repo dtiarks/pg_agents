@@ -10,7 +10,6 @@ from pg_agents.policies.gaussian_policy import GaussPolicy
 
 
 class BatchAlgo(object):
-    # TODO: Add checkpoint saver
     def __init__(self, sess, env, params, actiondim=1):
         self.params = params
         self.cnt = 0
@@ -36,7 +35,6 @@ class BatchAlgo(object):
         self.saver = tf.train.Saver()
         self.checkpoint_file = os.path.join(self.traindir, self.params['checkpoint_dir'], 'checkpoint')
 
-
         if params["latest_run"]:
             self.latest_traindir = os.path.join(params['traindir'], "run_%s" % params["latest_run"])
             latest_checkpoint = tf.train.latest_checkpoint(
@@ -48,9 +46,11 @@ class BatchAlgo(object):
         self.merged = tf.summary.merge_all()
         self.train_writer = tf.summary.FileWriter(self.traindir, sess.graph)
 
-        init = tf.global_variables_initializer()
-
-        sess.run(init)
+        if params["load_model"] is not None:
+            self.load_check_point(params["load_model"])
+        else:
+            init = tf.global_variables_initializer()
+            sess.run(init)
 
         sess.run(self.param_assign,
                  feed_dict={plh_key: p_entry.eval() for plh_key, p_entry in zip(self.p_plh, self.policy.params_list)})
@@ -129,11 +129,15 @@ class BatchAlgo(object):
 
     def save_check_point(self):
         name = self.saver.save(self.sess, self.checkpoint_file, global_step=0)
+        print("Saving checkpoint: {}".format(name))
 
-        print("Saving checkpoint: %s" % name)
+    def load_check_point(self, file_name):
+        print("Loading model: {}".format(file_name))
+        self.saver.restore(self.sess, file_name)
 
     def assign_metrics(self, step, feed_dict):
-        _, _,_, _, summary = self.sess.run([self.loss_summ_op, self.meanadv_op, self.ur_assign_op, self.maxret_op, self.merged], feed_dict=feed_dict)
+        _, _, _, _, summary = self.sess.run(
+            [self.loss_summ_op, self.meanadv_op, self.ur_assign_op, self.maxret_op, self.merged], feed_dict=feed_dict)
 
         self.train_writer.add_summary(summary, step)
 

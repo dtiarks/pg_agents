@@ -16,6 +16,7 @@ import roboschool
 
 sys.path.append('/'.join(str.split(__file__, '/')[:-2]))
 
+from pg_agents.algos.batchalgo import BatchAlgo
 from pg_agents.algos.vpg import VPG, VPGMiniBatch
 from pg_agents.algos.tnpg import TNPG
 from pg_agents.algos.trpo import TRPO
@@ -194,14 +195,12 @@ def run_experiment(env, sess, agent, params):
                                                                  base_path=(os.path.join(agent.traindir, envname)),
                                                                  enabled=True)
 
-    for t in range(50 * params['timesteps']):
-        done = False
-
+    for t in range(params['timesteps']):
         action = agent.get_action(obs_new)
 
         action = np.array(action).ravel()
         obs, r, done, _ = env.step(action)
-        # env.render("human")
+
         video_recorder.capture_frame()
 
         obs = np.array(obs).ravel()
@@ -211,6 +210,45 @@ def run_experiment(env, sess, agent, params):
             break
 
     video_recorder.close()
+
+
+def run_stored_agent(env, sess, params, render=True):
+    """
+
+    :param env: the environment
+    :type env: int
+    :param sess:
+    :param agent:
+    :param params:
+    """
+    agent = BatchAlgo(sess, env, params, actiondim=params["actionsize"])
+    obs_new = env.reset()
+    obs_new = np.array(obs_new).ravel()
+
+    if render is not True:
+        video_recorder = gym.monitoring.video_recorder.VideoRecorder(env=env,
+                                                                     base_path=(os.path.join(agent.traindir, envname)),
+                                                                     enabled=True)
+
+    for t in range(params['timesteps']):
+        action = agent.get_action(obs_new)
+
+        action = np.array(action).ravel()
+        obs, r, done, _ = env.step(action)
+
+        if render:
+            env.render("human")
+        else:
+            video_recorder.capture_frame()
+
+        obs = np.array(obs).ravel()
+        obs_new = obs
+
+        if done:
+            break
+
+    if render is not True:
+        video_recorder.close()
 
 
 if __name__ == '__main__':
@@ -228,11 +266,11 @@ if __name__ == '__main__':
 
     params = {
         "Env": envname,
-        "timesteps": 2000,  # 10000,
+        "timesteps": 2000,
         "trajectories": 2000,
-        "iterations": 500,
+        "iterations": 2000,
         "discount": 0.99,
-        "learningrate": 0.01,
+        "learningrate": 3e-4,
         "adam_eps": 1e-5,
         "init_std": 1.,
         "init_step": 0.05,
@@ -240,17 +278,19 @@ if __name__ == '__main__':
         "beta": 1.75,
         "linearsearch_steps": 50,
         "eps": 0.2,
-        "batch_size": 25000,
+        "batch_size": 2048,
         "mini_batch_size": 64,
-        "epochs": 5,
-        "use_linear_baseline": True,
-        "use_gae": False,
-        "lambda_gae": 0.97,
+        "epochs": 10,
+        "use_linear_baseline": False,
+        "use_gae": True,
+        "lambda_gae": 0.95,
         "normalize_gae": True,
         "actionsize": env.action_space.shape[0],
         "obssize": env.observation_space.shape[0],
         "traindir": "./train_dir",
         "summary_steps": 100,
+        "load_model": None,
+        # "load_model": "./models/RoboschoolHalfCheetah-v1_061017_221403/checkpoints/checkpoint-0",
         "checkpoint_dir": 'checkpoints',
         "checkpoint_steps": 200000,
         "latest_run": args.checkpoint,
@@ -262,21 +302,21 @@ if __name__ == '__main__':
     tf.reset_default_graph()
 
     with tf.Session() as sess:
-        return1, agent1 = train_experiment(env, sess, TRPO, params)
+        return1, agent1 = train_experiment(env, sess, PPO, params)
         env.close()
 
         np.save(os.path.join(agent1.traindir, 'params_dict.npy'), params)
 
         # env = gym.make(envname)
-        # return2, agent2 = train_experiment(env, sess, TRPO, params)
+        # run_experiment(env, sess, agent1, params)
         # env.close()
 
-        env = gym.make(envname)
-        run_experiment(env, sess, agent1, params)
-        env.close()
+        # env = gym.make(envname)
+        # run_stored_agent(env, sess, params)
+        # env.close()
 
-    plt.title("TRPO\nEnv: {}".format(params["Env"]))
-    plt.plot(return1, label="TRPO")
-    # plt.plot(return2, label="TRPO")
-    plt.legend()
-    plt.show()
+    # plt.title("TRPO\nEnv: {}".format(params["Env"]))
+    # plt.plot(return1, label="TRPO")
+    # # plt.plot(return2, label="TRPO")
+    # plt.legend()
+    # plt.show()

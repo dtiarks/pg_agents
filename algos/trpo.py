@@ -1,6 +1,4 @@
-from builtins import print
 
-import tensorflow as tf
 import numpy as np
 
 from pg_agents.algos.tnpg import TNPG
