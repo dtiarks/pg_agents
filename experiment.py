@@ -268,11 +268,11 @@ if __name__ == '__main__':
         "Env": envname,
         "timesteps": 2000,
         "trajectories": 2000,
-        "iterations": 2000,
+        "iterations": 5000,
         "discount": 0.99,
         "learningrate": 3e-4,
         "adam_eps": 1e-5,
-        "init_std": 1.,
+        "init_std": 0.6,
         "init_step": 0.05,
         "kl_penalty": 0.1,
         "beta": 1.75,
@@ -289,31 +289,29 @@ if __name__ == '__main__':
         "obssize": env.observation_space.shape[0],
         "traindir": "./train_dir",
         "summary_steps": 100,
-        "load_model": None,
-        # "load_model": "./models/RoboschoolHalfCheetah-v1_061017_221403/checkpoints/checkpoint-0",
+        # "load_model": None,
+        "load_model": "./train_dir/run_071017_192435/checkpoints/checkpoint-0",
         "checkpoint_dir": 'checkpoints',
         "checkpoint_steps": 200000,
-        "latest_run": args.checkpoint,
         "metricupdate": 10,
         "action_bound": env.action_space.high[0],
-        "store_video": 50
     }
 
     tf.reset_default_graph()
 
     with tf.Session() as sess:
-        return1, agent1 = train_experiment(env, sess, PPO, params)
-        env.close()
-
-        np.save(os.path.join(agent1.traindir, 'params_dict.npy'), params)
+        # return1, agent1 = train_experiment(env, sess, PPO, params)
+        # env.close()
+        #
+        # np.save(os.path.join(agent1.traindir, 'params_dict.npy'), params)
 
         # env = gym.make(envname)
         # run_experiment(env, sess, agent1, params)
         # env.close()
 
-        # env = gym.make(envname)
-        # run_stored_agent(env, sess, params)
-        # env.close()
+        env = gym.make(envname)
+        run_stored_agent(env, sess, params)
+        env.close()
 
     # plt.title("TRPO\nEnv: {}".format(params["Env"]))
     # plt.plot(return1, label="TRPO")

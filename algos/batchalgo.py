@@ -35,22 +35,14 @@ class BatchAlgo(object):
         self.saver = tf.train.Saver()
         self.checkpoint_file = os.path.join(self.traindir, self.params['checkpoint_dir'], 'checkpoint')
 
-        if params["latest_run"]:
-            self.latest_traindir = os.path.join(params['traindir'], "run_%s" % params["latest_run"])
-            latest_checkpoint = tf.train.latest_checkpoint(
-                os.path.join(self.latest_traindir, self.params['checkpoint_dir']))
-            if latest_checkpoint:
-                print("Loading model checkpoint {}...\n".format(latest_checkpoint))
-                self.saver.restore(sess, latest_checkpoint)
-
         self.merged = tf.summary.merge_all()
         self.train_writer = tf.summary.FileWriter(self.traindir, sess.graph)
 
+        init = tf.global_variables_initializer()
+        sess.run(init)
+
         if params["load_model"] is not None:
             self.load_check_point(params["load_model"])
-        else:
-            init = tf.global_variables_initializer()
-            sess.run(init)
 
         sess.run(self.param_assign,
                  feed_dict={plh_key: p_entry.eval() for plh_key, p_entry in zip(self.p_plh, self.policy.params_list)})
